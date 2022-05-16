@@ -1,0 +1,571 @@
+#include <avr/io.h>
+#include <math.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+#include <stdio.h> 
+
+
+
+/*---------------- DECLARACION DE VARIABLES GLOBALES ----------------*/
+
+volatile int contador=0, M=56,P=40, C=56, Objetos = 0,Posiciones[30],flag = 0;
+volatile double x=0.0, Tiempo =0.0, Tiempo_total_s = 0.0, Ajuste = 1.0;
+volatile bool Objeto_agarrado= false;
+
+
+/*---------------- DECLARACION DE FUNCIONES ----------------*/
+void Conf_Puerto_Serie();
+void Conf_Puertos();
+void Conf_Int_Externa();
+int Sensor_Ultrasonido();
+void Timer0();
+void Timer0_ON();
+void Timer0_OFF();
+void Timer1();
+void Timer1_ON();
+void Timer1_OFF();
+void Timer2();
+void Timer2_ON();
+void Timer2_OFF();
+void Posicion_de_medicion();
+void Posicion_Vertical();
+void Posicion_Robot(); 
+void MoverA(int a); //HOMBRO
+void MoverB(int b); //BASE
+void MoverM(int MUNECA); //MUNECA
+void MoverC(int CODO);   //CODO
+void MoverP(int PINZA); //PINZA
+void Ir_hacia_x_por_Debajo(double x);
+void Ir_hacia_x_por_Arriba(double x);
+void Agarrar_Objeto(double x);
+void Levantar_Objeto();
+void Buscar_Objetos(int p[]);
+void Descargar();
+
+  
+
+/*---------------- CONFIGURACION DE PUERTOS ----------------*/
+
+void Conf_Puerto_Serie(){
+  cli();
+  Serial.begin(115200);  
+  Serial.println("inicio");
+  Serial.flush();
+  sei();
+}
+
+void Conf_Puertos(){
+  cli();
+  DDRB |= (1<<PB1); //HOMBRO 2servos
+  DDRB |= (1<<PB2); //BASE
+  DDRB |= (1<<PB3); //PINZA
+  DDRB |= (1<<PB4); //MUÃ‘ECA
+  DDRD |= (1<<PD5); //CODO AHORA ES RELE
+  DDRD |= (1<<PD6); //CODO
+  DDRD |= (1<<PD3); //Trigger
+  DDRD &= ~(1<<PD2); //Echo
+  sei();
+}
+
+void Conf_Int_Externa(){
+  
+  cli();
+  //Configuracion de interrupcion externa con flanco ascendente 
+  EICRA |= (1<< ISC00); 
+  EICRA |= (1<< ISC01);
+  EIMSK |= (1<< INT0);
+  sei();   
+}
+
+/*---------------- TIMER 0 ----------------*/
+
+void Timer0(){
+  
+  cli();
+  //Modo Normal
+  TCCR0A &=  ~(1<<WGM00);  
+  TCCR0A &=  ~(1<<WGM01);
+  TCCR0B &=  ~(1<<WGM02);  
+  
+  //Prescaler en 0
+  TCCR0B &= ~(1<<CS00);    
+  TCCR0B &= ~(1<<CS01);  
+  TCCR0B &= ~(1<<CS02);
+  //Configuracion de interrupcion por overflow
+  TIMSK0 |= (1<<TOIE0);
+  TCNT0 = 0;
+  sei();   
+}
+
+void Timer0_ON(){
+   cli();
+   //Prescaler en 1
+   TCCR0B |= (1<<CS00);    
+   TCCR0B &= ~(1<<CS01);  
+   TCCR0B &= ~(1<<CS02);   
+   sei();
+}
+
+void Timer0_OFF(){
+    cli();
+   //Prescaler en 0;
+   TCCR0B &= ~(1<<CS00);    
+   TCCR0B &= ~(1<<CS01);  
+   TCCR0B &= ~(1<<CS02);
+
+   TCNT0 = 0;
+   sei();
+}
+
+//Base de tiempo
+ISR(TIMER0_OVF_vect){
+    Tiempo ++; /*en 1 seg 62745         255 --> 1 Tiempo ++      si fclock = 16 MHz   -> 255/(16x10^6) =  1.593x1-^-5 segs
+
+                                        1.593x10^-5 segs -- 1 Tiempo
+                                        1 seg            -- x = 62745 Tiempos       */                                                                                                              
+}
+
+
+/*---------------- TIMER 1 ----------------*/
+
+void Timer1(){
+  cli();
+  //Fast PWM con top en ICR1
+  TCCR1A &= ~(1<<WGM10);
+  TCCR1A |=  (1<<WGM11);
+  TCCR1B |=  (1<<WGM12);
+  TCCR1B |=  (1<<WGM13);
+
+  //Prescaler en 0
+  TCCR1B &= ~(1<<CS10);    
+  TCCR1B &= ~(1<<CS11);  
+  TCCR1B &= ~(1<<CS12);
+
+  TCNT1 = 0; 
+  
+  ICR1 = 39999; //50hz de PWM  fpwm = (fclk - Prescaler*50Hz)/Prescaler    Prescaler = 8;
+  OCR1A = 2999; 
+  OCR1B = 2999; 
+ 
+  //Configuracion de unidad comparadora
+  TCCR1A |= (1<<COM1A1);
+  TCCR1A |= (1<<COM1B1); 
+  sei();   
+}
+
+void Timer1_ON(){
+   cli();
+   //Prescaler en 8
+   TCCR1B &= ~(1<<CS10);    
+   TCCR1B |= (1<<CS11);  
+   TCCR1B &= ~(1<<CS12); 
+   sei();   
+}
+
+void Timer1_OFF(){
+   cli();
+   //Prescaler en 0;
+   TCCR1B &= ~(1<<CS10);    
+   TCCR1B &= ~(1<<CS11);  
+   TCCR1B &= ~(1<<CS12);
+
+   TCNT1 = 0;
+   sei();
+}
+
+/*---------------- TIMER 2 ----------------*/
+
+void Timer2(){
+  cli();
+  //Modo CTC 
+  TCCR2A &= ~(1<<WGM20);
+  TCCR2A |=  (1<<WGM21);
+  TCCR2B &= ~(1<<WGM22);
+
+  OCR2A = 50;  //OCR2A para que interrumpa por comparacion cada 0,025 ms
+  
+  //Prescaler en 0
+  TCCR2B &= ~(1<<CS20);    
+  TCCR2B &= ~(1<<CS21);  
+  TCCR2B &= ~(1<<CS22);
+
+  TIMSK2 |= (1<<OCIE2A); //Habilito interrupcion por coparacion cada vez que el registro TCNT2 llega a 50
+  TCNT2 = 0; //Inicializo el contador en cero
+
+  sei();
+}
+
+void Timer2_ON(){
+   cli();
+   //Prescaler en 8
+   TCCR2B &= ~(1<<CS20);    
+   TCCR2B |=  (1<<CS21);  
+   TCCR2B &= ~(1<<CS22);    
+   sei();
+}
+
+void Timer2_OFF(){
+   cli();
+   //Prescaler en 0
+   TCCR2B &= ~(1<<CS20);    
+   TCCR2B &= ~(1<<CS21);  
+   TCCR2B &= ~(1<<CS22);  
+   
+   TCNT2 = 0;  //Reinicio el contador
+   sei();
+}
+
+//Esta interrupcion se deberia dar cada vez que el timer llegue a OCR2A=50 que deberia ser cada 0,025 ms
+ISR(TIMER2_COMPA_vect){
+  
+  contador = contador + 1;
+  
+  //Si M/C es 16 el Servo estaria en 0 grados
+  //Si M/C es 56 el Servo estaria en 90 grados
+  //Si M/C es 96 el Servo estaria en 180 grados
+  
+  if(contador == (800-M)){
+    PORTB |= (1<<PB4);
+  }
+
+  if(contador == (800-P)){
+    PORTB |= (1<<PB3);
+  //Si P es 40 el Servo esta en 0 grados
+  //Si P es 60 el servo esta en 90 grados
+  //Si P es 80 el servo esta en 180 grados   
+  }
+  if(contador == (800-C)){
+    PORTD |= (1<<PD6);
+  }
+  if (contador == 800){
+    PORTB &= ~(1<<PB3); //PINZA
+    PORTB &= ~(1<<PB4); //MUÃ‘ECA
+    PORTD &= ~(1<<PD6); //CODO
+    contador=0; //Contador = 800 equivale a 20 ms  
+  }
+  
+}
+
+
+/*---------------- Sensor de ultrasonido----------------*/
+
+int Sensor_Ultrasonido() {
+  int distanciaCm;
+  
+  PORTD &= ~(1<<PD3);
+  _delay_us(4);
+  PORTD |= (1<<PD3); //Envio un 1 por el pin Trigger
+  _delay_us(10);
+  PORTD &= ~(1<<PD3); //Apago el trigger
+  
+  while(flag == 0){}
+  flag = 0;
+  distanciaCm =((Tiempo_total_s*33100.0)/2.0)*Ajuste + 1; //tiempo por la velocidad del sonido en cm/seg
+
+  return  distanciaCm;
+  
+}
+
+ISR(INT0_vect){
+    while(((PIND & (1<<PD2))>>PD2)==1){  
+    Timer0_ON(); //Inicio e timer
+    }
+    Timer0_OFF();
+
+
+
+    Tiempo_total_s = Tiempo/62745.0;   //Calculo el tiempo en segundos con la cantidad de interrupciones dividido el maximo de interrupciones en 1 seg.
+    //Tiempo = 0; //Reeinicio el Tiempo   
+    flag=1;   
+                
+}
+/*---------------- MOVIMIENTO DEL ROBOT ----------------*/
+
+/*A las funciones "MoverX" se les ingresa un valor el cual se traduce a un 
+  valor de duty determinado que coloca al servo en un determinado angulo */
+void MoverA(int a){
+  
+  /*Si el valor ingresado es menor al actual la funcion utilizara un ciclo "for" 
+    para decrementarlo hasta lograr el deseado y si es mayor hara lo contrario.*/
+  if (OCR1A>a){
+    for(OCR1A;OCR1A>a;OCR1A--){
+      _delay_us(700);     
+    }
+  }
+  else if (OCR1A<a)
+  {
+    for(OCR1A;OCR1A<a;OCR1A++){
+      _delay_us(700);   
+     }
+  }
+  else 
+  OCR1A = a;  
+}
+
+
+//Todas las funciones "MoverX" utilizan la misma logica por lo tanto no seran comentadas.
+void MoverB(int b){
+
+  if (OCR1B>b){
+    for(OCR1B;OCR1B>b;OCR1B--){
+      _delay_us(500);       
+    }
+  }
+  else if (OCR1B<b)
+  {
+    for(OCR1B;OCR1B<b;OCR1B++){
+      _delay_us(500);      
+    }
+  }
+}
+
+void MoverM(int MUNECA){
+  //Serial.println(M);
+  if (M>MUNECA){
+    for(M;M>MUNECA;M--){
+      _delay_ms(25);       
+    }
+  }
+  else if (M<MUNECA)
+  {
+    for(M;M<MUNECA;M++){
+      _delay_ms(25);
+     }
+  }
+  else return;  
+}
+
+void MoverC(int CODO){
+  //Serial.println(B);
+  if (C>CODO){
+    for(C;C>CODO;C--){
+      _delay_ms(20);       
+    }
+  }
+  else if (C<CODO)
+  {
+    for(C;C<CODO;C++){
+      _delay_ms(20);
+     }
+  }
+  else return;  
+}
+
+void MoverP(int PINZA){
+  //Serial.println(M);
+  if (P>PINZA){
+    for(P;P>PINZA;P--){
+      _delay_ms(10);       
+    }
+  }
+  else if (P<PINZA)
+  {
+    for(P;P<PINZA;P++){
+      _delay_ms(10);
+     }
+  }
+  else return;  
+}
+
+//Coloca al robot en la posicion inicial (todos los servos a 90 grados)
+void Posicion_Vertical(){
+  
+  MoverA(2999);  //90 grados  (duty: 7,5 %)
+  MoverM(56); //90 grados
+  MoverC(56); //90 grados  (duty: 7,5 %)
+  MoverP(40);
+  _delay_ms(100);
+}
+
+//Coloca al robot en una posicion determinada en la cual procede a realizar las mediciones
+void Posicion_Robot(){
+  
+  MoverA(2099);
+  MoverM(90);
+  MoverC(40);
+  MoverP(40);
+  _delay_ms(100); 
+}
+
+//Esta funcion da los angulos necesarios a los servos para que el brazo tenga la posicion necesaria para poder agarrar el objeto. 
+void Ir_hacia_x_por_Debajo(double x){
+  long double Pendiente =  0.4444444444444444444;
+  if(x<22.4){
+    double B2 = (x/2.0)/11.5;
+    double B3 = (x/2.0)/11.0; 
+    double tita1 = (180*asin(B2)/PI) + 180*asin(B3)/PI; //El por 180/pi es para pasar a grados ya que el Atmega hace la cuenta en radianes
+    MoverC(Pendiente*(-90 + tita1)+ 20);
+    MoverA(20*(180 - (180*acos(B2)/PI))+1199);     
+  }
+  else return;
+}
+
+
+void Ir_hacia_x_por_Arriba(double x){
+    long double Pendiente =  0.44444444444;
+  if(x<22.5){
+    
+    double B = (x - 11.0)/11.5;
+    double tita1 = 180*acos(B)/PI;
+    MoverC(Pendiente*(90-tita1)+20);
+    MoverA(20*(180-tita1)+1199);
+  }
+  else if (x>=22,5) return;
+      
+}
+void Agarrar_Objeto(double x){
+  
+  if(x<=18){
+
+    MoverM(82);
+    Ir_hacia_x_por_Arriba(x);
+    _delay_ms(500);
+    MoverP(65);
+    Objeto_agarrado = true;
+  }
+  else if ((18<x) and (x<=33))
+  {  
+    long double Pendiente =  0.4444444;
+    double tita2 = 180*asin((x-18)/18)/PI;
+    MoverM(Pendiente*(180-tita2)+16);
+    Ir_hacia_x_por_Arriba(19);
+    _delay_ms(500);
+    Objeto_agarrado = true;
+    MoverP(65);
+        
+  }
+  else if ((33<x) and (x<=44)) 
+  {
+    MoverM(68);
+    Ir_hacia_x_por_Debajo(22);    
+    _delay_ms(500);
+    MoverP(65);
+    Objeto_agarrado = true;
+  }
+}
+
+void Levantar_Objeto(int x){
+
+  double B = (x - 11.0)/11.5;
+  double tita1 = 180*acos(B)/PI;  
+  MoverA(20*(180-tita1)+1199);    
+}
+
+void Buscar_Objetos(volatile int p[]){
+  
+  int A=1199, distancia=0, medicion=0, A1=0, A2=0;  
+  
+  Objetos = 0;
+  MoverB(1199);
+  _delay_ms(1000);
+  distancia = Sensor_Ultrasonido();
+  for ( A = 1199; A<4999; A=A+10){  
+    if(Objetos < 10){
+        MoverB(A);
+        _delay_ms(7);  
+        distancia = Sensor_Ultrasonido();
+        Serial.println(distancia);
+     if ((distancia < 30) and (medicion == 0)){
+        A1 = A;
+        medicion = 1;
+        _delay_ms(80);
+        Serial.println(A);
+      }
+      else if ((distancia>=30) and (medicion == 1)){
+        A2 = A;
+        Serial.println(A);
+        p[Objetos] = (A1 + A2)/2;
+        medicion = 0;
+        Objetos ++;
+      }
+    }
+   Tiempo = 0;
+  }
+}
+
+void Descargar(){
+  if (Objeto_agarrado){
+    _delay_ms(100);
+    Levantar_Objeto(10);
+    _delay_ms(1000);    
+    MoverB(4999); //Lleva todo el brazo hacia la izquierda
+    _delay_ms(300);
+    MoverC(40);
+    _delay_ms(400);
+    MoverP(40);
+    Objeto_agarrado = false;
+   
+      }  
+}
+/*---------------- PROGRAMA PRINCIPAL ----------------*/
+
+int main(void){
+
+  Conf_Puertos();
+  Conf_Puerto_Serie();
+  Conf_Int_Externa();
+  Timer0();
+  Timer1();
+  Timer1_ON();
+  Timer2();
+  Timer2_ON();
+    
+  while(1){ 
+
+    //Apagado y encendido del Modulo Rele
+    PORTD |=(1<<PD5);
+    _delay_ms(4000);
+    PORTD &= ~(1<<PD5);
+    
+    Posicion_Vertical();
+
+    //Pone al brazo en posicion de busqueda
+    _delay_ms(2000);
+    Posicion_Robot();
+    
+    //Busqueda de los objetos
+    Buscar_Objetos(Posiciones);
+    _delay_ms(300);
+
+    //Agarra uno por uno todos los objetos encontrados
+    for (int i= 0;i<Objetos; i++){
+      MoverB(Posiciones[i]-120);
+      _delay_ms(500);
+      
+      //Realizo una primera medicion para obtener la distancia inicial y poder determinar si el brazo ubico el objeto correctamente
+      x = Sensor_Ultrasonido();
+      Tiempo = 0;
+
+      //Calculo la distancia promedio a la que se encuentra el objeto
+      if(x < 44){
+      int x1 = Sensor_Ultrasonido();
+      Tiempo = 0;
+      int x2 = Sensor_Ultrasonido();
+      Tiempo = 0;
+      int x3 = Sensor_Ultrasonido();
+      Tiempo = 0;
+      int x4 = Sensor_Ultrasonido();
+      Tiempo = 0;
+      int x5 = Sensor_Ultrasonido();
+      Tiempo = 0;
+      int x6 = Sensor_Ultrasonido();
+      Tiempo = 0;
+      x = (x1 + x2 + x3 + x4 + x5 + x6 )/6;
+      Serial.println(x);
+      _delay_ms(250);
+      Agarrar_Objeto(x+14); //Agarra el objeto
+      _delay_ms(650);
+      Descargar();
+      }
+      _delay_ms(600);
+      Posicion_Robot();
+      _delay_ms(100);
+
+    }
+    //Retorna el brazo a su pocicion de StandBy
+    MoverB(2999);
+    Posicion_Vertical();
+    _delay_ms(600);
+  }
+
+}
